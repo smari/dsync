@@ -6,6 +6,7 @@ from SimpleXMLRPCServer import SimpleXMLRPCServer, SimpleXMLRPCRequestHandler
 from hashlib import sha1
 import diff_match_patch as dmp_module
 import threading
+import json
 
 DEFAULT_PORT = 33411
 
@@ -14,19 +15,19 @@ class DSync:
 	def __init__(self):
 		self.dmp = dmp_module.diff_match_patch()
 		self.localtext = ""
-		self.shadow = {text: "", localv: 0, remotev: 0}
-		self.backup = {text: "", localv: 0}
+		self.shadow = {"text": "", "localv": 0, "remotev": 0}
+		self.backup = {"text": "", "localv": 0}
 
 	def set_text(self, text):
 		self.localtext = text
 		# Every time we apply a change, we must send them out:
-		self.message_send()	
+		return self.message_construct()
 
 	def get_text(self):
 		return self.localtext
 
 	def message_parse(self, msg):
-		if msg["lastv"] != shadow["localv"]:
+		if msg["lastv"] != self.shadow["localv"]:
 			# Recover
 			pass
 
@@ -34,27 +35,27 @@ class DSync:
 		for edit in msg["edits"]:
 			if not self.patch_shadow(edit):
 				# Hard patching failed, roll back hard.
-				shadow["text"] = backup["text"]
-				shadow["localv"] = backup["localv"]
+				self.shadow["text"] = self.backup["text"]
+				self.shadow["localv"] = self.backup["localv"]
 			else:
-				shadow["remotev"] = edit["v"]
+				self.shadow["remotev"] = edit["v"]
 
 		self.patch_localtext(edit)
 		# Check conflicts. If none, we're good.
 
 	def message_construct(self):
 		delta = self.diff_local()
-		msg = {"edits": [{diff: delta, v: shadow["localv"]}]}
+		msg = {"edits": [{"diff": delta, "v": self.shadow["localv"]}], "lastv": self.shadow["remotev"] }
 		self.update_shadow()
 		return msg
-
 
 	def update_shadow(self):
 		self.shadow["text"] = self.localtext
 		self.shadow["localv"] += 1
 
 	def patch_localtext(self, patches):
-		res, retval = self.dmp.patch_apply(patches, self.localtext)
+		patchset = self.dmp.patch_fromText(patches["diff"])
+		res, retval = self.dmp.patch_apply(patchset, self.localtext)
 		if all(retval) == True:
 			self.localtext = res
 			return False
@@ -62,12 +63,14 @@ class DSync:
 			return False
 
 	def patch_shadow(self, patches):
-		res, retval = self.dmp.patch_apply(patches, self.shadow["text"])
+		patchset = self.dmp.patch_fromText(patches["diff"])
+		res, retval = self.dmp.patch_apply(patchset, self.shadow["text"])
 		self.shadow["text"] = res
 		return True
 
 	def diff_local(self):
-		return self.dmp.patch_make(self.shadow["text"], self.localtext)
+		p = self.dmp.patch_make(self.shadow["text"], self.localtext)
+		return self.dmp.patch_toText(p)
 
 	def restore_backup(self):
 		self.shadow["text"] = self.backup["text"]
@@ -164,7 +167,35 @@ class DSyncPeerManager:
 
 
 if __name__ == "__main__":
-	dmp = dmp_module.diff_match_patch()
-	patches = dmp.patch_make("The man on the dancing boat went awol", "The man on the fishing boat went swimming")
-	print dmp.patch_toText(patches)
-	print dmp.patch_apply(patches, "The man on the dancing boat went awol")
+	d1 = DSync()
+	d2 = DSync()
+	d2.message_parse(d1.set_text("Cat"))
+	d2.message_parse(d1.set_text("Cat!"))
+	d2.message_parse(d1.set_text("Hat"))
+	print "D2 [Hat   ]: ", d2.get_text()
+	print "D1 [Hat   ]: ", d1.get_text()
+	d1.message_parse(d2.set_text("Hatter"))
+	print "D2 [Hatter]: ", d2.get_text()
+	print "D1 [Hatter]: ", d1.get_text()
+	d2.message_parse(d1.set_text("Arbitrary"))
+	print "D2 [Arbitr]: ", d2.get_text()
+	print "D1 [Arbitr]: ", d1.get_text()
+	print "--- Intentionally doing things out of sequence: ---"
+	r1 = d1.set_text("Monster")
+	r2 = d2.set_text("Arbitrary foo")
+	d2.message_parse(r1)
+	d1.message_parse(r2)
+	print "D2 [BREAK ]: ", d2.get_text()
+	print "D1 [BREAK ]: ", d1.get_text()
+	print "D1 shadow: %d/%d: '%s'" % (d1.shadow["localv"], d1.shadow["remotev"], d1.shadow["text"])
+	print "D2 shadow: %d/%d: '%s'" % (d2.shadow["localv"], d2.shadow["remotev"], d2.shadow["text"])
+	print "D1 backup: %d: '%s'" % (d1.backup["localv"], d1.backup["text"])
+	print "D2 backup: %d: '%s'" % (d2.backup["localv"], d2.backup["text"])
+	print "--- Intentionally doing things that are unacceptable: ---"
+	r1 = d1.set_text("Monster foo madness")
+	r2 = d1.set_text("Monster fudge madness")
+	d2.message_parse(r2)
+	d2.message_parse(r1)
+	print "D2 [BREAK ]: ", d2.get_text()
+	print "D2 shadow: %d/%d: '%s'" % (d2.shadow["localv"], d2.shadow["remotev"], d2.shadow["text"])
+	print "D2 backup: %d: '%s'" % (d2.backup["localv"], d2.backup["text"])
